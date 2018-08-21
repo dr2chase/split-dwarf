@@ -86,6 +86,8 @@ func (i Cpu) GoString() string { return stringName(uint32(i), cpuStrings, true) 
 // A LoadCmd is a Mach-O load command.
 type LoadCmd uint32
 
+func (c LoadCmd) Command() LoadCmd { return c }
+
 const (
 	// Note 3 and 8 are obsolete
 	LoadCmdSegment          LoadCmd = 0x1
@@ -145,7 +147,7 @@ func (i LoadCmd) GoString() string { return stringName(uint32(i), cmdStrings, tr
 type (
 	// A Segment32 is a 32-bit Mach-O segment load command.
 	Segment32 struct {
-		Cmd     LoadCmd
+		LoadCmd
 		Len     uint32
 		Name    [16]byte
 		Addr    uint32
@@ -160,7 +162,7 @@ type (
 
 	// A Segment64 is a 64-bit Mach-O segment load command.
 	Segment64 struct {
-		Cmd     LoadCmd
+		LoadCmd
 		Len     uint32
 		Name    [16]byte
 		Addr    uint64
@@ -175,7 +177,7 @@ type (
 
 	// A SymtabCmd is a Mach-O symbol table command.
 	SymtabCmd struct {
-		Cmd     LoadCmd
+		LoadCmd
 		Len     uint32
 		Symoff  uint32
 		Nsyms   uint32
@@ -185,7 +187,7 @@ type (
 
 	// A DysymtabCmd is a Mach-O dynamic symbol table command.
 	DysymtabCmd struct {
-		Cmd            LoadCmd
+		LoadCmd
 		Len            uint32
 		Ilocalsym      uint32
 		Nlocalsym      uint32
@@ -209,7 +211,7 @@ type (
 
 	// A DylibCmd is a Mach-O load dynamic library command.
 	DylibCmd struct {
-		Cmd            LoadCmd
+		LoadCmd
 		Len            uint32
 		Name           uint32
 		Time           uint32
@@ -219,21 +221,21 @@ type (
 
 	// A DylinkerCmd is a Mach-O load dynamic linker or environment command.
 	DylinkerCmd struct {
-		Cmd  LoadCmd
+		LoadCmd
 		Len  uint32
 		Name uint32
 	}
 
 	// A RpathCmd is a Mach-O rpath command.
 	RpathCmd struct {
-		Cmd  LoadCmd
+		LoadCmd
 		Len  uint32
 		Path uint32
 	}
 
 	// A Thread is a Mach-O thread state command.
 	Thread struct {
-		Cmd  LoadCmd
+		LoadCmd
 		Len  uint32
 		Type uint32
 		Data []uint32
@@ -241,7 +243,7 @@ type (
 
 	// LC_DYLD_INFO, LC_DYLD_INFO_ONLY
 	DyldInfoCmd struct {
-		Cmd                      LoadCmd
+		LoadCmd
 		Len                      uint32
 		RebaseOff, RebaseLen     uint32 // file offset and length; data contains segment indices
 		BindOff, BindLen         uint32 // file offset and length; data contains segment indices
@@ -252,14 +254,14 @@ type (
 
 	// LC_CODE_SIGNATURE, LC_SEGMENT_SPLIT_INFO, LC_FUNCTION_STARTS, LC_DATA_IN_CODE, LC_DYLIB_CODE_SIGN_DRS
 	LinkEditDataCmd struct {
-		Cmd              LoadCmd
+		LoadCmd
 		Len              uint32
 		DataOff, DataLen uint32 // file offset and length
 	}
 
 	// LC_ENCRYPTION_INFO, LC_ENCRYPTION_INFO_64
 	EncryptionInfoCmd struct {
-		Cmd                LoadCmd
+		LoadCmd
 		Len                uint32
 		CryptOff, CryptLen uint32 // file offset and length
 		CryptId            uint32
@@ -268,14 +270,14 @@ type (
 	// TODO Commands below not fully supported yet.
 
 	EntryPointCmd struct {
-		Cmd       LoadCmd
+		LoadCmd
 		Len       uint32
 		EntryOff  uint64 // file offset
 		StackSize uint64 // if not zero, initial stack size
 	}
 
 	NoteCmd struct {
-		Cmd            LoadCmd
+		LoadCmd
 		Len            uint32
 		Name           [16]byte
 		Offset, Filesz uint64 // file offset and length

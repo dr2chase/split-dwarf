@@ -129,16 +129,17 @@ writes debugging-stripped (but linked via ___ section) outputexe.
 	//   Some of these symbols appear to be duplicates of other indirect symbols appearing early
 	//
 
-	// if exem.Cmdsz != exem.LoadSize() {
-	// 	fail("recorded command size %d does not equal computed command size %d", exem.Cmdsz, exem.LoadSize())
-	// } else {
-	// 	note("recorded command size %d, computed command size %d", exem.Cmdsz, exem.LoadSize())
-	// }
-	// note("File size is %d", exem.FileSize())
+	if uint64(exem.Cmdsz) != exem.LoadSize() {
+		fail("recorded command size %d does not equal computed command size %d", exem.Cmdsz, exem.LoadSize())
+	} else {
+		note("recorded command size %d, computed command size %d", exem.Cmdsz, exem.LoadSize())
+	}
+	note("File size is %d", exem.FileSize())
 
 	// Create a File for the output dwarf.
 	// Copy header, file type is MH_DSYM
 	// Copy the relevant load commands
+
 	// LoadCmdUuid
 	// Symtab -- very abbreviated (Use DYSYMTAB Iextdefsym, Nextdefsym to identify these).
 	// Segment __PAGEZERO
@@ -154,37 +155,35 @@ writes debugging-stripped (but linked via ___ section) outputexe.
 			uuid = l
 		}
 	}
-	symtab := exem.Symtab
-	dysymtab := exem.Dysymtab // Not appearing in output, but necessary to construct output
-	text := exem.Segment("__TEXT")
-	data := exem.Segment("__DATA")
-	linkedit := exem.Segment("__LINKEDIT")
-	dwarf := exem.Segment("__DWARF")
-	pagezero := exem.Segment("__PAGEZERO")
+
+	if uuid == nil {
+		note("%s has no uuid", inexe)
+	}
 
 	nonnilC := func(l macho.Load, s string) {
 		if l == nil {
 			fail("input file %s lacks load command %s", inexe, s)
 		}
 	}
-	nonnilS := func(l macho.Load, s string) {
+
+	nonnilS := func(s string) *macho.Segment {
+		l := exem.Segment(s)
 		if l == nil {
 			fail("input file %s lacks segment %s", inexe, s)
 		}
+		return l
 	}
 
-	if uuid == nil {
-		note("%s has no uuid", inexe)
-	}
-
+	symtab := exem.Symtab
+	dysymtab := exem.Dysymtab // Not appearing in output, but necessary to construct output
 	nonnilC(symtab, "symtab")
 	nonnilC(dysymtab, "dysymtab")
 
-	nonnilS(pagezero, "pagezero")
-	nonnilS(text, "text")
-	nonnilS(data, "data")
-	nonnilS(linkedit, "linkedit")
-	nonnilS(dwarf, "dwarf")
+	text := nonnilS("__TEXT")
+	data := nonnilS("__DATA")
+	linkedit := nonnilS("__LINKEDIT")
+	dwarf := nonnilS("__DWARF")
+	pagezero := nonnilS("__PAGEZERO")
 
 	// Figure out the size
 	// uuid + symtab + pagezero + text + data +
@@ -203,6 +202,9 @@ writes debugging-stripped (but linked via ___ section) outputexe.
 		_ = newsymtab
 		_ = newtext
 		_ = newdata
+		_ = linkedit
+		_ = dwarf
+		_ = pagezero
 		return
 	}
 

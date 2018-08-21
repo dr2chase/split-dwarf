@@ -16,6 +16,7 @@ import (
 	"io"
 	"os"
 	"strings"
+	"unsafe"
 )
 
 type FileTOC struct {
@@ -25,15 +26,31 @@ type FileTOC struct {
 	Sections  []*Section
 }
 
+// DerivedCopy returns a modified copy of the TOC, with empty loads and sections,
+// and with the specified header type and flags.
+func (t *FileTOC) DerivedCopy(Type HdrType, Flags HdrFlags) *FileTOC {
+	h := t.FileHeader
+	h.Ncmd, h.Cmdsz, h.Type, h.Flags = 0, 0, Type, Flags
+
+	return &FileTOC{FileHeader: h, ByteOrder: t.ByteOrder}
+}
+
 // TOCSize returns the size in bytes of the object file representation
 // of the header and Load Commands (including Segments and Sections, but
 // not their contents) at the beginning of a Mach-O file.  This typically
 // overlaps the text segment in the object file.
-func (t *FileTOC) TOCSize() uint32 {
+func (t *FileTOC) TOCSize() uint64 {
 	return t.HdrSize() + t.LoadSize()
 }
 
-func (t *FileTOC) HdrSize() uint32 {
+func (t *FileTOC) LoadAlign() uint64 {
+	if t.Magic == Magic64 {
+		return 8
+	}
+	return 4
+}
+
+func (t *FileTOC) HdrSize() uint64 {
 	switch t.Magic {
 	case Magic32:
 		return fileHeaderSize32
@@ -46,10 +63,13 @@ func (t *FileTOC) HdrSize() uint32 {
 	}
 }
 
-func (t *FileTOC) LoadSize() uint32 {
-	cmdsz := uint32(0)
+// LoadSize returns the size of all the load commands in a file's table-of contents
+// (but not their associated data, e.g., sections and symbol tables)
+func (t *FileTOC) LoadSize() uint64 {
+	cmdsz := uint64(0)
 	for _, l := range t.Loads {
-		cmdsz += uint32(len(l.Raw()))
+		s := l.LoadSize(t)
+		cmdsz += s
 	}
 	return cmdsz
 }
@@ -130,9 +150,9 @@ type move struct {
 
 // A Load represents any Mach-O load command.
 type Load interface {
-	Raw() []byte
 	String() string
 	Command() LoadCmd
+	LoadSize(*FileTOC) uint64 // Need the TOC for alignment, sigh.
 
 	// original_segment.ResizeFileData(copy Load, how int, align uint64) uint64, state // adjust file data; may be wrong in the immediate []byte data ; return new size.
 
@@ -190,8 +210,9 @@ func (b LoadBytes) String() string {
 	return s
 }
 
-func (b LoadBytes) Raw() []byte     { return b }
-func (b LoadBytes) Copy() LoadBytes { return LoadBytes(append([]byte{}, b...)) }
+func (b LoadBytes) Raw() []byte                { return b }
+func (b LoadBytes) Copy() LoadBytes            { return LoadBytes(append([]byte{}, b...)) }
+func (b LoadBytes) LoadSize(t *FileTOC) uint64 { return uint64(len(b)) }
 
 // LoadCmdBytes is a command-tagged sequence of bytes.
 // This is used for Load Commands that are not (yet)
@@ -205,15 +226,13 @@ type LoadCmdBytes struct {
 func (s LoadCmdBytes) String() string {
 	return s.LoadCmd.String() + ": " + s.LoadBytes.String()
 }
-func (s LoadCmdBytes) Command() LoadCmd {
-	return s.LoadCmd
-}
 func (s LoadCmdBytes) Copy() LoadCmdBytes {
 	return LoadCmdBytes{LoadCmd: s.LoadCmd, LoadBytes: s.LoadBytes.Copy()}
 }
 
 // A SegmentHeader is the header for a Mach-O 32-bit or 64-bit load segment command.
 type SegmentHeader struct {
+	LoadCmd
 	Len       uint32
 	Name      string // 16 characters or fewer
 	Addr      uint64 // memory address
@@ -229,7 +248,6 @@ type SegmentHeader struct {
 
 // A Segment represents a Mach-O 32-bit or 64-bit load segment command.
 type Segment struct {
-	LoadCmdBytes
 	SegmentHeader
 
 	// Embed ReaderAt for ReadAt method.
@@ -242,7 +260,17 @@ type Segment struct {
 	sr *io.SectionReader
 }
 
-func (s *Segment) String() string { return "Segment " + s.Name }
+func (s *SegmentHeader) String() string {
+	return fmt.Sprintf(
+		"Seg %s, len=0x%x, addr=0x%x, memsz=0x%x, offset=0x%x, filesz=0x%x, maxprot=0x%x, prot=0x%x, nsect=%d, flag=0x%x, firstsect=%d",
+		s.Name, s.Len, s.Addr, s.Memsz, s.Offset, s.Filesz, s.Maxprot, s.Prot, s.Nsect, s.Flag, s.Firstsect)
+}
+
+func (s *Segment) String() string {
+	return fmt.Sprintf(
+		"Seg %s, len=0x%x, addr=0x%x, memsz=0x%x, offset=0x%x, filesz=0x%x, maxprot=0x%x, prot=0x%x, nsect=%d, flag=0x%x, firstsect=%d",
+		s.Name, s.Len, s.Addr, s.Memsz, s.Offset, s.Filesz, s.Maxprot, s.Prot, s.Nsect, s.Flag, s.Firstsect)
+}
 
 // Data reads and returns the contents of the segment.
 func (s *Segment) Data() ([]byte, error) {
@@ -252,6 +280,17 @@ func (s *Segment) Data() ([]byte, error) {
 		err = nil
 	}
 	return dat[0:n], err
+}
+
+func (s *Segment) Copy() *Segment {
+	return &Segment{SegmentHeader: s.SegmentHeader}
+}
+
+func (s *Segment) LoadSize(t *FileTOC) uint64 {
+	if s.Command() == LoadCmdSegment64 {
+		return uint64(unsafe.Sizeof(Segment64{})) + uint64(s.Nsect)*uint64(unsafe.Sizeof(Section64{}))
+	}
+	return uint64(unsafe.Sizeof(Segment32{})) + uint64(s.Nsect)*uint64(unsafe.Sizeof(Section32{}))
 }
 
 // Open returns a new ReadSeeker reading the segment.
@@ -310,102 +349,120 @@ func (s *Section) Data() ([]byte, error) {
 	return dat[0:n], err
 }
 
+func (s *Section) Copy() *Section {
+	return &Section{SectionHeader: s.SectionHeader}
+}
+
 // Open returns a new ReadSeeker reading the Mach-O section.
 func (s *Section) Open() io.ReadSeeker { return io.NewSectionReader(s.sr, 0, 1<<63-1) }
 
 // A Dylib represents a Mach-O load dynamic library command.
 type Dylib struct {
-	LoadBytes
+	DylibCmd
 	Name           string
 	Time           uint32
 	CurrentVersion uint32
 	CompatVersion  uint32
 }
 
-func (s *Dylib) String() string   { return "Dylib " + s.Name }
-func (s *Dylib) Command() LoadCmd { return LoadCmdDylib }
+func (s *Dylib) String() string { return "Dylib " + s.Name }
 func (s *Dylib) Copy() *Dylib {
 	r := *s
-	r.LoadBytes = s.LoadBytes.Copy()
 	return &r
+}
+func (s *Dylib) LoadSize(t *FileTOC) uint64 {
+	return roundup(uint64(unsafe.Sizeof(DylibCmd{}))+uint64(len(s.Name)), t.LoadAlign())
 }
 
 type Dylinker struct {
-	LoadCmdBytes // shared by 3 commands, need the LoadCmd
-	Name         string
+	DylinkerCmd // shared by 3 commands, need the LoadCmd
+	Name        string
 }
 
-func (s *Dylinker) String() string { return s.LoadCmd.String() + " " + s.Name }
+func (s *Dylinker) String() string { return s.DylinkerCmd.LoadCmd.String() + " " + s.Name }
 func (s *Dylinker) Copy() *Dylinker {
-	return &Dylinker{LoadCmdBytes: s.LoadCmdBytes.Copy(), Name: s.Name}
+	return &Dylinker{DylinkerCmd: s.DylinkerCmd, Name: s.Name}
+}
+func (s *Dylinker) LoadSize(t *FileTOC) uint64 {
+	return roundup(uint64(unsafe.Sizeof(DylinkerCmd{}))+uint64(len(s.Name)), t.LoadAlign())
 }
 
 // A Symtab represents a Mach-O symbol table command.
 type Symtab struct {
-	LoadBytes
 	SymtabCmd
 	Syms []Symbol
 }
 
-func (s *Symtab) String() string   { return fmt.Sprintf("Symtab %#v", s.SymtabCmd) }
-func (s *Symtab) Command() LoadCmd { return LoadCmdSymtab }
+func (s *Symtab) String() string { return fmt.Sprintf("Symtab %#v", s.SymtabCmd) }
 func (s *Symtab) Copy() *Symtab {
-	return &Symtab{LoadBytes: s.LoadBytes.Copy(), SymtabCmd: s.SymtabCmd, Syms: append([]Symbol{}, s.Syms...)}
+	return &Symtab{SymtabCmd: s.SymtabCmd, Syms: append([]Symbol{}, s.Syms...)}
+}
+func (s *Symtab) LoadSize(t *FileTOC) uint64 {
+	return uint64(unsafe.Sizeof(SymtabCmd{}))
 }
 
 type LinkEditData struct {
-	LoadCmdBytes
 	LinkEditDataCmd
 }
 
-func (s *LinkEditData) String() string { return "LinkEditData " + s.Cmd.String() }
+func (s *LinkEditData) String() string { return "LinkEditData " + s.LoadCmd.String() }
 func (s *LinkEditData) Copy() *LinkEditData {
-	return &LinkEditData{LoadCmdBytes: s.LoadCmdBytes.Copy(), LinkEditDataCmd: s.LinkEditDataCmd}
+	return &LinkEditData{LinkEditDataCmd: s.LinkEditDataCmd}
+}
+func (s *LinkEditData) LoadSize(t *FileTOC) uint64 {
+	return uint64(unsafe.Sizeof(LinkEditDataCmd{}))
 }
 
 type DyldInfo struct {
-	LoadCmdBytes
 	DyldInfoCmd
 }
 
-func (s *DyldInfo) String() string { return "DyldInfo " + s.Cmd.String() }
+func (s *DyldInfo) String() string { return "DyldInfo " + s.LoadCmd.String() }
 func (s *DyldInfo) Copy() *DyldInfo {
-	return &DyldInfo{LoadCmdBytes: s.LoadCmdBytes.Copy(), DyldInfoCmd: s.DyldInfoCmd}
+	return &DyldInfo{DyldInfoCmd: s.DyldInfoCmd}
+}
+func (s *DyldInfo) LoadSize(t *FileTOC) uint64 {
+	return uint64(unsafe.Sizeof(DyldInfoCmd{}))
 }
 
 type EncryptionInfo struct {
-	LoadCmdBytes
 	EncryptionInfoCmd
 }
 
-func (s *EncryptionInfo) String() string { return "EncryptionInfo " + s.Cmd.String() }
+func (s *EncryptionInfo) String() string { return "EncryptionInfo " + s.LoadCmd.String() }
 func (s *EncryptionInfo) Copy() *EncryptionInfo {
-	return &EncryptionInfo{LoadCmdBytes: s.LoadCmdBytes.Copy(), EncryptionInfoCmd: s.EncryptionInfoCmd}
+	return &EncryptionInfo{EncryptionInfoCmd: s.EncryptionInfoCmd}
+}
+func (s *EncryptionInfo) LoadSize(t *FileTOC) uint64 {
+	return uint64(unsafe.Sizeof(EncryptionInfoCmd{}))
 }
 
 // A Dysymtab represents a Mach-O dynamic symbol table command.
 type Dysymtab struct {
-	LoadBytes
 	DysymtabCmd
 	IndirectSyms []uint32 // indices into Symtab.Syms
 }
 
-func (s *Dysymtab) String() string   { return fmt.Sprintf("Dysymtab %#v", s.DysymtabCmd) }
-func (s *Dysymtab) Command() LoadCmd { return LoadCmdDysymtab }
+func (s *Dysymtab) String() string { return fmt.Sprintf("Dysymtab %#v", s.DysymtabCmd) }
 func (s *Dysymtab) Copy() *Dysymtab {
-	return &Dysymtab{LoadBytes: s.LoadBytes.Copy(), DysymtabCmd: s.DysymtabCmd, IndirectSyms: append([]uint32{}, s.IndirectSyms...)}
+	return &Dysymtab{DysymtabCmd: s.DysymtabCmd, IndirectSyms: append([]uint32{}, s.IndirectSyms...)}
+}
+func (s *Dysymtab) LoadSize(t *FileTOC) uint64 {
+	return uint64(unsafe.Sizeof(DysymtabCmd{}))
 }
 
 // A Rpath represents a Mach-O rpath command.
 type Rpath struct {
-	LoadBytes
 	Path string
 }
 
 func (s *Rpath) String() string   { return "Rpath " + s.Path }
 func (s *Rpath) Command() LoadCmd { return LoadCmdRpath }
 func (s *Rpath) Copy() *Rpath {
-	return &Rpath{LoadBytes: s.LoadBytes.Copy(), Path: s.Path}
+	return &Rpath{Path: s.Path}
+}
+func (s *Rpath) LoadSize(t *FileTOC) uint64 {
+	return roundup(uint64(unsafe.Sizeof(RpathCmd{}))+uint64(len(s.Path)), t.LoadAlign())
 }
 
 // A Symbol is a Mach-O 32-bit or 64-bit symbol table entry.
@@ -544,11 +601,10 @@ func NewFile(r io.ReaderAt) (*File, error) {
 				return nil, &FormatError{offset, "invalid path in rpath command", hdr.Path}
 			}
 			l.Path = cstring(cmddat[hdr.Path:])
-			l.LoadBytes = LoadBytes(cmddat)
 			f.Loads[i] = l
 
 		case LoadCmdLoadDylinker, LoadCmdIdDylinker, LoadCmdDyldEnv:
-			var hdr DylibCmd
+			var hdr DylinkerCmd
 			b := bytes.NewReader(cmddat)
 			if err := binary.Read(b, bo, &hdr); err != nil {
 				return nil, err
@@ -558,7 +614,7 @@ func NewFile(r io.ReaderAt) (*File, error) {
 				return nil, &FormatError{offset, "invalid name in dynamic linker command", hdr.Name}
 			}
 			l.Name = cstring(cmddat[hdr.Name:])
-			l.LoadCmdBytes = LoadCmdBytes{LoadCmd(cmd), LoadBytes(cmddat)}
+			l.DylinkerCmd = hdr
 			f.Loads[i] = l
 
 		case LoadCmdDylib:
@@ -575,7 +631,6 @@ func NewFile(r io.ReaderAt) (*File, error) {
 			l.Time = hdr.Time
 			l.CurrentVersion = hdr.CurrentVersion
 			l.CompatVersion = hdr.CompatVersion
-			l.LoadBytes = LoadBytes(cmddat)
 			f.Loads[i] = l
 
 		case LoadCmdSymtab:
@@ -621,7 +676,6 @@ func NewFile(r io.ReaderAt) (*File, error) {
 				return nil, err
 			}
 			st := new(Dysymtab)
-			st.LoadBytes = LoadBytes(cmddat)
 			st.DysymtabCmd = hdr
 			st.IndirectSyms = x
 			f.Loads[i] = st
@@ -634,7 +688,6 @@ func NewFile(r io.ReaderAt) (*File, error) {
 				return nil, err
 			}
 			s = new(Segment)
-			s.LoadBytes = cmddat
 			s.LoadCmd = cmd
 			s.Len = siz
 			s.Name = cstring(seg32.Name[0:])
@@ -677,7 +730,6 @@ func NewFile(r io.ReaderAt) (*File, error) {
 				return nil, err
 			}
 			s = new(Segment)
-			s.LoadBytes = cmddat
 			s.LoadCmd = cmd
 			s.Len = siz
 			s.Name = cstring(seg64.Name[0:])
@@ -725,7 +777,6 @@ func NewFile(r io.ReaderAt) (*File, error) {
 			l := new(LinkEditData)
 
 			l.LinkEditDataCmd = hdr
-			l.LoadCmdBytes = LoadCmdBytes{LoadCmd(cmd), LoadBytes(cmddat)}
 			f.Loads[i] = l
 
 		case LoadCmdEncryptionInfo, LoadCmdEncryptionInfo64:
@@ -738,7 +789,6 @@ func NewFile(r io.ReaderAt) (*File, error) {
 			l := new(EncryptionInfo)
 
 			l.EncryptionInfoCmd = hdr
-			l.LoadCmdBytes = LoadCmdBytes{LoadCmd(cmd), LoadBytes(cmddat)}
 			f.Loads[i] = l
 
 		case LoadCmdDyldInfo, LoadCmdDyldInfoOnly:
@@ -751,12 +801,15 @@ func NewFile(r io.ReaderAt) (*File, error) {
 			l := new(DyldInfo)
 
 			l.DyldInfoCmd = hdr
-			l.LoadCmdBytes = LoadCmdBytes{LoadCmd(cmd), LoadBytes(cmddat)}
 			f.Loads[i] = l
 		}
 		if s != nil {
 			s.sr = io.NewSectionReader(r, int64(s.Offset), int64(s.Filesz))
 			s.ReaderAt = s.sr
+		}
+		if f.Loads[i].LoadSize(&f.FileTOC) != uint64(siz) {
+			fmt.Printf("Oops, actual size was %d, calculated was %d, load was %s\n", siz, f.Loads[i].LoadSize(&f.FileTOC), f.Loads[i].String())
+			panic("oops")
 		}
 	}
 	return f, nil
@@ -794,7 +847,6 @@ func (f *File) parseSymtab(symdat, strtab, cmddat []byte, hdr *SymtabCmd, offset
 		sym.Value = n.Value
 	}
 	st := new(Symtab)
-	st.LoadBytes = LoadBytes(cmddat)
 	st.Syms = symtab
 	return st, nil
 }
@@ -999,4 +1051,8 @@ func (f *File) ImportedLibraries() ([]string, error) {
 		}
 	}
 	return all, nil
+}
+
+func roundup(x, align uint64) uint64 {
+	return uint64((x + align - 1) & -align)
 }
