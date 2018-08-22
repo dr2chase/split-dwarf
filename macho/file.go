@@ -287,7 +287,7 @@ func (s *Segment) Copy() *Segment {
 }
 
 func (s *Segment) LoadSize(t *FileTOC) uint64 {
-	if s.Command() == LoadCmdSegment64 {
+	if s.Command() == LcSegment64 {
 		return uint64(unsafe.Sizeof(Segment64{})) + uint64(s.Nsect)*uint64(unsafe.Sizeof(Section64{}))
 	}
 	return uint64(unsafe.Sizeof(Segment32{})) + uint64(s.Nsect)*uint64(unsafe.Sizeof(Section32{}))
@@ -457,7 +457,7 @@ type Rpath struct {
 }
 
 func (s *Rpath) String() string   { return "Rpath " + s.Path }
-func (s *Rpath) Command() LoadCmd { return LoadCmdRpath }
+func (s *Rpath) Command() LoadCmd { return LcRpath }
 func (s *Rpath) Copy() *Rpath {
 	return &Rpath{Path: s.Path}
 }
@@ -590,7 +590,7 @@ func NewFile(r io.ReaderAt) (*File, error) {
 		default:
 			f.Loads[i] = LoadCmdBytes{LoadCmd(cmd), LoadBytes(cmddat)}
 
-		case LoadCmdRpath:
+		case LcRpath:
 			var hdr RpathCmd
 			b := bytes.NewReader(cmddat)
 			if err := binary.Read(b, bo, &hdr); err != nil {
@@ -603,7 +603,7 @@ func NewFile(r io.ReaderAt) (*File, error) {
 			l.Path = cstring(cmddat[hdr.Path:])
 			f.Loads[i] = l
 
-		case LoadCmdLoadDylinker, LoadCmdIdDylinker, LoadCmdDyldEnv:
+		case LcLoadDylinker, LcIdDylinker, LcDyldEnvironment:
 			var hdr DylinkerCmd
 			b := bytes.NewReader(cmddat)
 			if err := binary.Read(b, bo, &hdr); err != nil {
@@ -617,7 +617,7 @@ func NewFile(r io.ReaderAt) (*File, error) {
 			l.DylinkerCmd = hdr
 			f.Loads[i] = l
 
-		case LoadCmdDylib:
+		case LcDylib:
 			var hdr DylibCmd
 			b := bytes.NewReader(cmddat)
 			if err := binary.Read(b, bo, &hdr); err != nil {
@@ -633,7 +633,7 @@ func NewFile(r io.ReaderAt) (*File, error) {
 			l.CompatVersion = hdr.CompatVersion
 			f.Loads[i] = l
 
-		case LoadCmdSymtab:
+		case LcSymtab:
 			var hdr SymtabCmd
 			b := bytes.NewReader(cmddat)
 			if err := binary.Read(b, bo, &hdr); err != nil {
@@ -661,7 +661,7 @@ func NewFile(r io.ReaderAt) (*File, error) {
 			f.Loads[i] = st
 			f.Symtab = st
 
-		case LoadCmdDysymtab:
+		case LcDysymtab:
 			var hdr DysymtabCmd
 			b := bytes.NewReader(cmddat)
 			if err := binary.Read(b, bo, &hdr); err != nil {
@@ -681,7 +681,7 @@ func NewFile(r io.ReaderAt) (*File, error) {
 			f.Loads[i] = st
 			f.Dysymtab = st
 
-		case LoadCmdSegment:
+		case LcSegment:
 			var seg32 Segment32
 			b := bytes.NewReader(cmddat)
 			if err := binary.Read(b, bo, &seg32); err != nil {
@@ -723,7 +723,7 @@ func NewFile(r io.ReaderAt) (*File, error) {
 				}
 			}
 
-		case LoadCmdSegment64:
+		case LcSegment64:
 			var seg64 Segment64
 			b := bytes.NewReader(cmddat)
 			if err := binary.Read(b, bo, &seg64); err != nil {
@@ -766,8 +766,8 @@ func NewFile(r io.ReaderAt) (*File, error) {
 				}
 			}
 
-		case LoadCmdCodeSignature, LoadCmdSegmentSplitInfo, LoadCmdFunctionStarts,
-			LoadCmdDataInCode, LoadCmdDylibCodeSignDrs:
+		case LcCodeSignature, LcSegmentSplitInfo, LcFunctionStarts,
+			LcDataInCode, LcDylibCodeSignDrs:
 			var hdr LinkEditDataCmd
 			b := bytes.NewReader(cmddat)
 
@@ -779,7 +779,7 @@ func NewFile(r io.ReaderAt) (*File, error) {
 			l.LinkEditDataCmd = hdr
 			f.Loads[i] = l
 
-		case LoadCmdEncryptionInfo, LoadCmdEncryptionInfo64:
+		case LcEncryptionInfo, LcEncryptionInfo64:
 			var hdr EncryptionInfoCmd
 			b := bytes.NewReader(cmddat)
 
@@ -791,7 +791,7 @@ func NewFile(r io.ReaderAt) (*File, error) {
 			l.EncryptionInfoCmd = hdr
 			f.Loads[i] = l
 
-		case LoadCmdDyldInfo, LoadCmdDyldInfoOnly:
+		case LcDyldInfo, LcDyldInfoOnly:
 			var hdr DyldInfoCmd
 			b := bytes.NewReader(cmddat)
 

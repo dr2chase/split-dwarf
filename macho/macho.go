@@ -38,20 +38,20 @@ type SecFlags uint32
 // A HdrType is the Mach-O file type, e.g. an object file, executable, or dynamic library.
 type HdrType uint32
 
-const (
-	TypeObj    HdrType = 1
-	TypeExec   HdrType = 2
-	TypeCore   HdrType = 4
-	TypeDylib  HdrType = 6
-	TypeBundle HdrType = 8
-	TypeDsym   HdrType = 0xa
+const ( // SNAKE_CASE to CamelCase translation from C names
+	MhObject  HdrType = 1
+	MhExecute HdrType = 2
+	MhCore    HdrType = 4
+	MhDylib   HdrType = 6
+	MhBundle  HdrType = 8
+	MhDsym    HdrType = 0xa
 )
 
 var typeStrings = []intName{
-	{uint32(TypeObj), "Obj"},
-	{uint32(TypeExec), "Exec"},
-	{uint32(TypeDylib), "Dylib"},
-	{uint32(TypeBundle), "Bundle"},
+	{uint32(MhObject), "Obj"},
+	{uint32(MhExecute), "Exec"},
+	{uint32(MhDylib), "Dylib"},
+	{uint32(MhBundle), "Bundle"},
 }
 
 func (t HdrType) String() string   { return stringName(uint32(t), typeStrings, false) }
@@ -88,57 +88,57 @@ type LoadCmd uint32
 
 func (c LoadCmd) Command() LoadCmd { return c }
 
-const (
+const ( // SNAKE_CASE to CamelCase translation from C names
 	// Note 3 and 8 are obsolete
-	LoadCmdSegment          LoadCmd = 0x1
-	LoadCmdSymtab           LoadCmd = 0x2
-	LoadCmdThread           LoadCmd = 0x4
-	LoadCmdUnixThread       LoadCmd = 0x5 // thread+stack
-	LoadCmdDysymtab         LoadCmd = 0xb
-	LoadCmdDylib            LoadCmd = 0xc // load dylib command
-	LoadCmdIdDylib          LoadCmd = 0xd // dynamically linked shared lib ident
-	LoadCmdLoadDylinker     LoadCmd = 0xe // load a dynamic linker
-	LoadCmdIdDylinker       LoadCmd = 0xf // id dylinker command (not load dylinker command)
-	LoadCmdSegment64        LoadCmd = 0x19
-	LoadCmdUuid             LoadCmd = 0x1b
-	LoadCmdCodeSignature    LoadCmd = 0x1d
-	LoadCmdSegmentSplitInfo LoadCmd = 0x1e
-	LoadCmdRpath            LoadCmd = 0x8000001c
-	LoadCmdEncryptionInfo   LoadCmd = 0x21
-	LoadCmdDyldInfo         LoadCmd = 0x22
-	LoadCmdDyldInfoOnly     LoadCmd = 0x80000022
-	LoadCmdMinOsx           LoadCmd = 0x24
-	LoadCmdMinIos           LoadCmd = 0x25
-	LoadCmdFunctionStarts   LoadCmd = 0x26
-	LoadCmdDyldEnv          LoadCmd = 0x27
-	LoadCmdMain             LoadCmd = 0x80000028 // replacement for UnixThread
-	LoadCmdDataInCode       LoadCmd = 0x29       // There are non-instructions in text
-	LoadCmdSourceVersion    LoadCmd = 0x2a       // Source version used to build binary
-	LoadCmdDylibCodeSignDrs LoadCmd = 0x2b
-	LoadCmdEncryptionInfo64 LoadCmd = 0x2c
-	LoadCmdMinTvos          LoadCmd = 0x2f
-	LoadCmdMinWatchos       LoadCmd = 0x30
+	LcSegment            LoadCmd = 0x1
+	LcSymtab             LoadCmd = 0x2
+	LcThread             LoadCmd = 0x4
+	LcUnixthread         LoadCmd = 0x5 // thread+stack
+	LcDysymtab           LoadCmd = 0xb
+	LcDylib              LoadCmd = 0xc // load dylib command
+	LcIdDylib            LoadCmd = 0xd // dynamically linked shared lib ident
+	LcLoadDylinker       LoadCmd = 0xe // load a dynamic linker
+	LcIdDylinker         LoadCmd = 0xf // id dylinker command (not load dylinker command)
+	LcSegment64          LoadCmd = 0x19
+	LcUuid               LoadCmd = 0x1b
+	LcCodeSignature      LoadCmd = 0x1d
+	LcSegmentSplitInfo   LoadCmd = 0x1e
+	LcRpath              LoadCmd = 0x8000001c
+	LcEncryptionInfo     LoadCmd = 0x21
+	LcDyldInfo           LoadCmd = 0x22
+	LcDyldInfoOnly       LoadCmd = 0x80000022
+	LcVersionMinMacosx   LoadCmd = 0x24
+	LcVersionMinIphoneos LoadCmd = 0x25
+	LcFunctionStarts     LoadCmd = 0x26
+	LcDyldEnvironment    LoadCmd = 0x27
+	LcMain               LoadCmd = 0x80000028 // replacement for UnixThread
+	LcDataInCode         LoadCmd = 0x29       // There are non-instructions in text
+	LcSourceVersion      LoadCmd = 0x2a       // Source version used to build binary
+	LcDylibCodeSignDrs   LoadCmd = 0x2b
+	LcEncryptionInfo64   LoadCmd = 0x2c
+	LcVersionMinTvos     LoadCmd = 0x2f
+	LcVersionMinWatchos  LoadCmd = 0x30
 )
 
 var cmdStrings = []intName{
-	{uint32(LoadCmdSegment), "LoadCmdSegment"},
-	{uint32(LoadCmdThread), "LoadCmdThread"},
-	{uint32(LoadCmdUnixThread), "LoadCmdUnixThread"},
-	{uint32(LoadCmdDylib), "LoadCmdDylib"},
-	{uint32(LoadCmdIdDylib), "LoadCmdIdDylib"},
-	{uint32(LoadCmdLoadDylinker), "LoadCmdLoadDylinker"},
-	{uint32(LoadCmdIdDylinker), "LoadCmdIdDylinker"},
-	{uint32(LoadCmdSegment64), "LoadCmdSegment64"},
-	{uint32(LoadCmdUuid), "LoadCmdUuid"},
-	{uint32(LoadCmdRpath), "LoadCmdRpath"},
-	{uint32(LoadCmdDyldEnv), "LoadCmdDyldEnv"},
-	{uint32(LoadCmdMain), "LoadCmdMain"},
-	{uint32(LoadCmdDataInCode), "LoadCmdDataInCode"},
-	{uint32(LoadCmdSourceVersion), "LoadCmdSourceVersion"},
-	{uint32(LoadCmdDyldInfo), "LoadCmdDyldInfo"},
-	{uint32(LoadCmdDyldInfoOnly), "LoadCmdDyldInfoOnly"},
-	{uint32(LoadCmdMinOsx), "LoadCmdMinOsx"},
-	{uint32(LoadCmdFunctionStarts), "LoadCmdFunctionStarts"},
+	{uint32(LcSegment), "LoadCmdSegment"},
+	{uint32(LcThread), "LoadCmdThread"},
+	{uint32(LcUnixthread), "LoadCmdUnixThread"},
+	{uint32(LcDylib), "LoadCmdDylib"},
+	{uint32(LcIdDylib), "LoadCmdIdDylib"},
+	{uint32(LcLoadDylinker), "LoadCmdLoadDylinker"},
+	{uint32(LcIdDylinker), "LoadCmdIdDylinker"},
+	{uint32(LcSegment64), "LoadCmdSegment64"},
+	{uint32(LcUuid), "LoadCmdUuid"},
+	{uint32(LcRpath), "LoadCmdRpath"},
+	{uint32(LcDyldEnvironment), "LoadCmdDyldEnv"},
+	{uint32(LcMain), "LoadCmdMain"},
+	{uint32(LcDataInCode), "LoadCmdDataInCode"},
+	{uint32(LcSourceVersion), "LoadCmdSourceVersion"},
+	{uint32(LcDyldInfo), "LoadCmdDyldInfo"},
+	{uint32(LcDyldInfoOnly), "LoadCmdDyldInfoOnly"},
+	{uint32(LcVersionMinMacosx), "LoadCmdMinOsx"},
+	{uint32(LcFunctionStarts), "LoadCmdFunctionStarts"},
 }
 
 func (i LoadCmd) String() string   { return stringName(uint32(i), cmdStrings, false) }

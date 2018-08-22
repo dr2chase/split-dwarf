@@ -151,7 +151,7 @@ writes debugging-stripped (but linked via ___ section) outputexe.
 	var uuid macho.Load
 	for _, l := range exem.Loads {
 		switch l.Command() {
-		case macho.LoadCmdUuid:
+		case macho.LcUuid:
 			uuid = l
 		}
 	}
