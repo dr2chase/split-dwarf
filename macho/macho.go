@@ -7,7 +7,10 @@
 
 package macho
 
-import "strconv"
+import (
+	"encoding/binary"
+	"strconv"
+)
 
 // A FileHeader represents a Mach-O file header.
 type FileHeader struct {
@@ -18,6 +21,21 @@ type FileHeader struct {
 	Ncmd   uint32 // number of load commands
 	Cmdsz  uint32 // size of all the load commands
 	Flags  HdrFlags
+}
+
+func (h *FileHeader) Put(b []byte, o binary.ByteOrder) int {
+	o.PutUint32(b[0:], h.Magic)
+	o.PutUint32(b[4:], uint32(h.Cpu))
+	o.PutUint32(b[8:], h.SubCpu)
+	o.PutUint32(b[12:], uint32(h.Type))
+	o.PutUint32(b[16:], h.Ncmd)
+	o.PutUint32(b[20:], h.Cmdsz)
+	o.PutUint32(b[24:], uint32(h.Flags))
+	if h.Magic == Magic32 {
+		return 28
+	}
+	o.PutUint32(b[28:], 0)
+	return 32
 }
 
 const (
@@ -52,6 +70,7 @@ var typeStrings = []intName{
 	{uint32(MhExecute), "Exec"},
 	{uint32(MhDylib), "Dylib"},
 	{uint32(MhBundle), "Bundle"},
+	{uint32(MhDsym), "Dsym"},
 }
 
 func (t HdrType) String() string   { return stringName(uint32(t), typeStrings, false) }
@@ -360,6 +379,24 @@ type Nlist64 struct {
 	Sect  uint8
 	Desc  uint16
 	Value uint64
+}
+
+func (n *Nlist64) Put64(b []byte, o binary.ByteOrder) uint32 {
+	o.PutUint32(b[0:], n.Name)
+	b[4] = byte(n.Type)
+	b[5] = byte(n.Sect)
+	o.PutUint16(b[6:], n.Desc)
+	o.PutUint64(b[8:], n.Value)
+	return 8 + 8
+}
+
+func (n *Nlist64) Put32(b []byte, o binary.ByteOrder) uint32 {
+	o.PutUint32(b[0:], n.Name)
+	b[4] = byte(n.Type)
+	b[5] = byte(n.Sect)
+	o.PutUint16(b[6:], n.Desc)
+	o.PutUint32(b[8:], uint32(n.Value))
+	return 8 + 4
 }
 
 // Regs386 is the Mach-O 386 register structure.

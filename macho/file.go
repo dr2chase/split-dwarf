@@ -19,113 +19,6 @@ import (
 	"unsafe"
 )
 
-type FileTOC struct {
-	FileHeader
-	ByteOrder binary.ByteOrder
-	Loads     []Load
-	Sections  []*Section
-}
-
-// DerivedCopy returns a modified copy of the TOC, with empty loads and sections,
-// and with the specified header type and flags.
-func (t *FileTOC) DerivedCopy(Type HdrType, Flags HdrFlags) *FileTOC {
-	h := t.FileHeader
-	h.Ncmd, h.Cmdsz, h.Type, h.Flags = 0, 0, Type, Flags
-
-	return &FileTOC{FileHeader: h, ByteOrder: t.ByteOrder}
-}
-
-// TOCSize returns the size in bytes of the object file representation
-// of the header and Load Commands (including Segments and Sections, but
-// not their contents) at the beginning of a Mach-O file.  This typically
-// overlaps the text segment in the object file.
-func (t *FileTOC) TOCSize() uint64 {
-	return t.HdrSize() + t.LoadSize()
-}
-
-func (t *FileTOC) LoadAlign() uint64 {
-	if t.Magic == Magic64 {
-		return 8
-	}
-	return 4
-}
-
-func (t *FileTOC) HdrSize() uint64 {
-	switch t.Magic {
-	case Magic32:
-		return fileHeaderSize32
-	case Magic64:
-		return fileHeaderSize64
-	case MagicFat:
-		panic("MagicFat not handled yet")
-	default:
-		panic(fmt.Sprintf("Unexpected magic number 0x%x, expected Mach-O object file", t.Magic))
-	}
-}
-
-// LoadSize returns the size of all the load commands in a file's table-of contents
-// (but not their associated data, e.g., sections and symbol tables)
-func (t *FileTOC) LoadSize() uint64 {
-	cmdsz := uint64(0)
-	for _, l := range t.Loads {
-		s := l.LoadSize(t)
-		cmdsz += s
-	}
-	return cmdsz
-}
-
-// FileSize returns the size in bytes of the header, load commands, and the
-// in-file contents of all the segments and sections included in those
-// load commands, accounting for their offsets within the file.
-func (t *FileTOC) FileSize() uint64 {
-	sz := uint64(t.LoadSize()) // ought to be contained in text segment, but just in case.
-	for _, l := range t.Loads {
-		if s, ok := l.(*Segment); ok {
-			if m := s.Offset + s.Filesz; m > sz {
-				sz = m
-			}
-		}
-	}
-	return sz
-}
-
-// TODO WIP
-
-// CopyOC creates an empty copy of a file's table of contents.
-func (f *File) CopyOC() *FileTOC {
-	nt := &FileTOC{FileHeader: f.FileHeader, ByteOrder: f.ByteOrder}
-	return nt
-}
-
-// UncompressedSize returns the size of the segment with its sections uncompressed, ignoring
-// its offset within the file.  The returned size is rounded up to the power of two in align.
-func (s *Segment) UncompressedSize(t *FileTOC, align uint64) uint64 {
-	sz := uint64(0)
-	for j := uint32(0); j < s.Nsect; j++ {
-		c := t.Sections[j+s.Firstsect]
-		sz += c.UncompressedSize()
-	}
-	return (sz + align - 1) & uint64(-int64(align))
-}
-
-func (s *Section) UncompressedSize() uint64 {
-	if !strings.HasPrefix(s.Name, "__z") {
-		return s.Size
-	}
-	b := make([]byte, 12)
-	n, err := s.sr.ReadAt(b, 0)
-	if err != nil {
-		panic("Malformed object file")
-	}
-	if n != len(b) {
-		return s.Size
-	}
-	if string(b[:4]) == "ZLIB" {
-		return 12 + binary.BigEndian.Uint64(b[4:12])
-	}
-	return s.Size
-}
-
 // A File represents an open Mach-O file.
 type File struct {
 	FileTOC
@@ -136,27 +29,51 @@ type File struct {
 	closer io.Closer
 }
 
-// compress, uncompress, copy, remove
-const (
-	RESIZE_REMOVE = iota
-	RESIZE_COPY
-	RESIZE_UNCOMPRESS
-	// RESIZE_COMPRESS
-)
+type FileTOC struct {
+	FileHeader
+	ByteOrder binary.ByteOrder
+	Loads     []Load
+	Sections  []*Section
+}
 
-type move struct {
-	from, to uint64
+func (t *FileTOC) AddLoad(l Load) {
+	t.Loads = append(t.Loads, l)
+	t.Ncmd++
+	t.Cmdsz += l.LoadSize(t)
+}
+
+// AddSegment adds segment s to the file table of contents,
+// and also zeroes out the segment information with the expectation
+// that this will be added next.
+func (t *FileTOC) AddSegment(s *Segment) {
+	t.AddLoad(s)
+	s.Nsect = 0
+	s.Firstsect = 0
+}
+
+// Adds section to the most recently added Segment
+func (t *FileTOC) AddSection(s *Section) {
+	g := t.Loads[len(t.Loads)-1].(*Segment)
+	if g.Nsect == 0 {
+		g.Firstsect = uint32(len(t.Sections))
+	}
+	g.Nsect++
+	t.Sections = append(t.Sections, s)
+	sectionsize := uint32(unsafe.Sizeof(Section32{}))
+	if g.Command() == LcSegment64 {
+		sectionsize  = uint32(unsafe.Sizeof(Section64{}))
+	}
+	t.Cmdsz +=sectionsize
+	g.Len +=sectionsize
 }
 
 // A Load represents any Mach-O load command.
 type Load interface {
 	String() string
 	Command() LoadCmd
-	LoadSize(*FileTOC) uint64 // Need the TOC for alignment, sigh.
+	LoadSize(*FileTOC) uint32 // Need the TOC for alignment, sigh.
+	Put([]byte, binary.ByteOrder) int
 
-	// original_segment.ResizeFileData(copy Load, how int, align uint64) uint64, state // adjust file data; may be wrong in the immediate []byte data ; return new size.
-
-	// original.AdjustFileOffsets(copy Load, moves []move) // with updated offsets, correct in copy
 	// command LC_DYLD_INFO_ONLY contains offsets into __LINKEDIT
 	// e.g., from "otool -l a.out"
 	//
@@ -185,50 +102,10 @@ type Load interface {
 	//  lazy_bind_size 16
 	//      export_off 8240
 	//     export_size 48
-
-	// original_segment.CopyFileData(state interface{}, where []byte) // with a destination allocated
-
-	// copy.CopyCommand(where []byte) // copy updated commands into place.
 }
 
 // LoadBytes is the uninterpreted bytes of a Mach-O load command.
 type LoadBytes []byte
-
-func (b LoadBytes) String() string {
-	s := "["
-	for i, a := range b {
-		if i > 0 {
-			s += " "
-			if len(b) > 48 && i >= 16 {
-				s += fmt.Sprintf("... (%d bytes)", len(b))
-				break
-			}
-		}
-		s += fmt.Sprintf("%x", a)
-	}
-	s += "]"
-	return s
-}
-
-func (b LoadBytes) Raw() []byte                { return b }
-func (b LoadBytes) Copy() LoadBytes            { return LoadBytes(append([]byte{}, b...)) }
-func (b LoadBytes) LoadSize(t *FileTOC) uint64 { return uint64(len(b)) }
-
-// LoadCmdBytes is a command-tagged sequence of bytes.
-// This is used for Load Commands that are not (yet)
-// interesting to us, and to common up this behavior for
-// all those that are.
-type LoadCmdBytes struct {
-	LoadCmd
-	LoadBytes
-}
-
-func (s LoadCmdBytes) String() string {
-	return s.LoadCmd.String() + ": " + s.LoadBytes.String()
-}
-func (s LoadCmdBytes) Copy() LoadCmdBytes {
-	return LoadCmdBytes{LoadCmd: s.LoadCmd, LoadBytes: s.LoadBytes.Copy()}
-}
 
 // A SegmentHeader is the header for a Mach-O 32-bit or 64-bit load segment command.
 type SegmentHeader struct {
@@ -260,41 +137,44 @@ type Segment struct {
 	sr *io.SectionReader
 }
 
-func (s *SegmentHeader) String() string {
-	return fmt.Sprintf(
-		"Seg %s, len=0x%x, addr=0x%x, memsz=0x%x, offset=0x%x, filesz=0x%x, maxprot=0x%x, prot=0x%x, nsect=%d, flag=0x%x, firstsect=%d",
-		s.Name, s.Len, s.Addr, s.Memsz, s.Offset, s.Filesz, s.Maxprot, s.Prot, s.Nsect, s.Flag, s.Firstsect)
+func (s *Segment) Put32(b []byte, o binary.ByteOrder) int {
+	o.PutUint32(b[0*4:], uint32(s.LoadCmd))
+	o.PutUint32(b[1*4:], s.Len)
+	putAtMost16Bytes(b[2*4:], s.Name)
+	o.PutUint32(b[6*4:], uint32(s.Addr))
+	o.PutUint32(b[7*4:], uint32(s.Memsz))
+	o.PutUint32(b[8*4:], uint32(s.Offset))
+	o.PutUint32(b[9*4:], uint32(s.Filesz))
+	o.PutUint32(b[10*4:], s.Maxprot)
+	o.PutUint32(b[11*4:], s.Prot)
+	o.PutUint32(b[12*4:], s.Nsect)
+	o.PutUint32(b[13*4:], uint32(s.Flag))
+	return 14 * 4
 }
 
-func (s *Segment) String() string {
-	return fmt.Sprintf(
-		"Seg %s, len=0x%x, addr=0x%x, memsz=0x%x, offset=0x%x, filesz=0x%x, maxprot=0x%x, prot=0x%x, nsect=%d, flag=0x%x, firstsect=%d",
-		s.Name, s.Len, s.Addr, s.Memsz, s.Offset, s.Filesz, s.Maxprot, s.Prot, s.Nsect, s.Flag, s.Firstsect)
+func (s *Segment) Put64(b []byte, o binary.ByteOrder) int {
+	o.PutUint32(b[0*4:], uint32(s.LoadCmd))
+	o.PutUint32(b[1*4:], s.Len)
+	putAtMost16Bytes(b[2*4:], s.Name)
+	o.PutUint64(b[6*4+0*8:], s.Addr)
+	o.PutUint64(b[6*4+1*8:], s.Memsz)
+	o.PutUint64(b[6*4+2*8:], s.Offset)
+	o.PutUint64(b[6*4+3*8:], s.Filesz)
+	o.PutUint32(b[6*4+4*8:], s.Maxprot)
+	o.PutUint32(b[7*4+4*8:], s.Prot)
+	o.PutUint32(b[8*4+4*8:], s.Nsect)
+	o.PutUint32(b[9*4+4*8:], uint32(s.Flag))
+	return 10*4 + 4*8
 }
 
-// Data reads and returns the contents of the segment.
-func (s *Segment) Data() ([]byte, error) {
-	dat := make([]byte, s.sr.Size())
-	n, err := s.sr.ReadAt(dat, 0)
-	if n == len(dat) {
-		err = nil
-	}
-	return dat[0:n], err
+// LoadCmdBytes is a command-tagged sequence of bytes.
+// This is used for Load Commands that are not (yet)
+// interesting to us, and to common up this behavior for
+// all those that are.
+type LoadCmdBytes struct {
+	LoadCmd
+	LoadBytes
 }
-
-func (s *Segment) Copy() *Segment {
-	return &Segment{SegmentHeader: s.SegmentHeader}
-}
-
-func (s *Segment) LoadSize(t *FileTOC) uint64 {
-	if s.Command() == LcSegment64 {
-		return uint64(unsafe.Sizeof(Segment64{})) + uint64(s.Nsect)*uint64(unsafe.Sizeof(Section64{}))
-	}
-	return uint64(unsafe.Sizeof(Segment32{})) + uint64(s.Nsect)*uint64(unsafe.Sizeof(Section32{}))
-}
-
-// Open returns a new ReadSeeker reading the segment.
-func (s *Segment) Open() io.ReadSeeker { return io.NewSectionReader(s.sr, 0, 1<<63-1) }
 
 type SectionHeader struct {
 	Name      string
@@ -339,6 +219,361 @@ type Section struct {
 	sr *io.SectionReader
 }
 
+func (s *Section) Put32(b []byte, o binary.ByteOrder) int {
+	putAtMost16Bytes(b[0:], s.Name)
+	putAtMost16Bytes(b[16:], s.Seg)
+	o.PutUint32(b[8*4:], uint32(s.Addr))
+	o.PutUint32(b[9*4:], uint32(s.Size))
+	o.PutUint32(b[10*4:], s.Offset)
+	o.PutUint32(b[11*4:], s.Align)
+	o.PutUint32(b[12*4:], s.Reloff)
+	o.PutUint32(b[13*4:], s.Nreloc)
+	o.PutUint32(b[14*4:], uint32(s.Flags))
+	o.PutUint32(b[15*4:], s.Reserved1)
+	o.PutUint32(b[16*4:], s.Reserved2)
+	a := 17 * 4
+	return a + s.PutRelocs(b[a:], o)
+}
+
+func (s *Section) Put64(b []byte, o binary.ByteOrder) int {
+	putAtMost16Bytes(b[0:], s.Name)
+	putAtMost16Bytes(b[16:], s.Seg)
+	o.PutUint64(b[8*4+0*8:], s.Addr)
+	o.PutUint64(b[8*4+1*8:], s.Size)
+	o.PutUint32(b[8*4+2*8:], s.Offset)
+	o.PutUint32(b[9*4+2*8:], s.Align)
+	o.PutUint32(b[10*4+2*8:], s.Reloff)
+	o.PutUint32(b[11*4+2*8:], s.Nreloc)
+	o.PutUint32(b[12*4+2*8:], uint32(s.Flags))
+	o.PutUint32(b[13*4+2*8:], s.Reserved1)
+	o.PutUint32(b[14*4+2*8:], s.Reserved2)
+	o.PutUint32(b[15*4+2*8:], s.Reserved3)
+	a := 16*4 + 2*8
+	return a + s.PutRelocs(b[a:], o)
+}
+
+func (s *Section) PutRelocs(b []byte, o binary.ByteOrder) int {
+	a := 0
+	for _, r := range s.Relocs {
+		var ri relocInfo
+		typ := uint32(r.Type) & (1<<4 - 1)
+		len := uint32(r.Len) & (1<<2 - 1)
+		pcrel := uint32(0)
+		if r.Pcrel {
+			pcrel = 1
+		}
+		ext := uint32(0)
+		if r.Extern {
+			ext = 1
+		}
+		switch {
+		case r.Scattered:
+			ri.Addr = r.Addr&(1<<24-1) | typ<<24 | len<<28 | 1<<31 | pcrel<<30
+			ri.Symnum = r.Value
+		case o == binary.LittleEndian:
+			ri.Addr = r.Addr
+			ri.Symnum = r.Value&(1<<24-1) | pcrel << 24 | len<<25 | ext << 27 | typ << 28
+		case o == binary.BigEndian:
+			ri.Addr = r.Addr
+			ri.Symnum = r.Value << 8 | pcrel << 7 | len << 5 | ext << 4 | typ
+		}
+		o.PutUint32(b, ri.Addr)
+		o.PutUint32(b[4:], ri.Symnum)
+		a += 8
+		b = b[8:]
+	}
+	return a
+}
+
+
+func putAtMost16Bytes(b []byte, n string) {
+	for i := range n { // at most 16 bytes
+		if i == 16 {
+			break
+		}
+		b[i] = n[i]
+	}
+}
+
+// A Symbol is a Mach-O 32-bit or 64-bit symbol table entry.
+type Symbol struct {
+	Name  string
+	Type  uint8
+	Sect  uint8
+	Desc  uint16
+	Value uint64
+}
+
+/*
+ * Mach-O reader
+ */
+
+// FormatError is returned by some operations if the data does
+// not have the correct format for an object file.
+type FormatError struct {
+	off int64
+	msg string
+}
+
+func formatError(off int64, format string, data ...interface{}) *FormatError {
+	return &FormatError{off, fmt.Sprintf(format, data...)}
+}
+
+func (e *FormatError) Error() string {
+	return e.msg + fmt.Sprintf(" in record at byte %#x", e.off)
+}
+
+func (e *FormatError) String() string {
+	return e.Error()
+}
+
+// DerivedCopy returns a modified copy of the TOC, with empty loads and sections,
+// and with the specified header type and flags.
+func (t *FileTOC) DerivedCopy(Type HdrType, Flags HdrFlags) *FileTOC {
+	h := t.FileHeader
+	h.Ncmd, h.Cmdsz, h.Type, h.Flags = 0, 0, Type, Flags
+
+	return &FileTOC{FileHeader: h, ByteOrder: t.ByteOrder}
+}
+
+// TOCSize returns the size in bytes of the object file representation
+// of the header and Load Commands (including Segments and Sections, but
+// not their contents) at the beginning of a Mach-O file.  This typically
+// overlaps the text segment in the object file.
+func (t *FileTOC) TOCSize() uint32 {
+	return t.HdrSize() + t.LoadSize()
+}
+
+func (t *FileTOC) LoadAlign() uint64 {
+	if t.Magic == Magic64 {
+		return 8
+	}
+	return 4
+}
+
+func (t *FileTOC) SymbolSize() uint32 {
+	if t.Magic == Magic64 {
+		return uint32(unsafe.Sizeof(Nlist64{}))
+	}
+	return uint32(unsafe.Sizeof(Nlist32{}))
+}
+
+func (t *FileTOC) HdrSize() uint32 {
+	switch t.Magic {
+	case Magic32:
+		return fileHeaderSize32
+	case Magic64:
+		return fileHeaderSize64
+	case MagicFat:
+		panic("MagicFat not handled yet")
+	default:
+		panic(fmt.Sprintf("Unexpected magic number 0x%x, expected Mach-O object file", t.Magic))
+	}
+}
+
+// LoadSize returns the size of all the load commands in a file's table-of contents
+// (but not their associated data, e.g., sections and symbol tables)
+func (t *FileTOC) LoadSize() uint32 {
+	cmdsz := uint32(0)
+	for _, l := range t.Loads {
+		s := l.LoadSize(t)
+		cmdsz += s
+	}
+	return cmdsz
+}
+
+// FileSize returns the size in bytes of the header, load commands, and the
+// in-file contents of all the segments and sections included in those
+// load commands, accounting for their offsets within the file.
+func (t *FileTOC) FileSize() uint64 {
+	sz := uint64(t.LoadSize()) // ought to be contained in text segment, but just in case.
+	for _, l := range t.Loads {
+		if s, ok := l.(*Segment); ok {
+			if m := s.Offset + s.Filesz; m > sz {
+				sz = m
+			}
+		}
+	}
+	return sz
+}
+
+func (t *FileTOC) Put(buffer []byte) int {
+	next := t.FileHeader.Put(buffer, t.ByteOrder)
+	for _, l := range t.Loads {
+		if s, ok := l.(*Segment); ok {
+			switch t.Magic {
+			case Magic64:
+				next += s.Put64(buffer[next:], t.ByteOrder)
+				for i := uint32(0); i < s.Nsect; i++ {
+					c := t.Sections[ i+s.Firstsect]
+					next += c.Put64(buffer[next:], t.ByteOrder)
+				}
+			case Magic32:
+				next += s.Put32(buffer[next:], t.ByteOrder)
+				for i := uint32(0); i < s.Nsect; i++ {
+					c := t.Sections[ i+s.Firstsect]
+					next += c.Put32(buffer[next:], t.ByteOrder)
+				}
+			default:
+				panic(fmt.Sprintf("Unexpected magic number 0x%x", t.Magic))
+			}
+
+		} else {
+			next += l.Put(buffer[next:], t.ByteOrder)
+		}
+	}
+	return next
+}
+
+// UncompressedSize returns the size of the segment with its sections uncompressed, ignoring
+// its offset within the file.  The returned size is rounded up to the power of two in align.
+func (s *Segment) UncompressedSize(t *FileTOC, align uint64) uint64 {
+	sz := uint64(0)
+	for j := uint32(0); j < s.Nsect; j++ {
+		c := t.Sections[j+s.Firstsect]
+		sz += c.UncompressedSize()
+	}
+	return (sz + align - 1) & uint64(-int64(align))
+}
+
+func (s *Section) UncompressedSize() uint64 {
+	if !strings.HasPrefix(s.Name, "__z") {
+		return s.Size
+	}
+	b := make([]byte, 12)
+	n, err := s.sr.ReadAt(b, 0)
+	if err != nil {
+		panic("Malformed object file")
+	}
+	if n != len(b) {
+		return s.Size
+	}
+	if string(b[:4]) == "ZLIB" {
+		return binary.BigEndian.Uint64(b[4:12])
+	}
+	return s.Size
+}
+
+func (s *Section) PutData(b []byte) {
+	bb := b[0:s.Size]
+	n, err := s.sr.ReadAt(bb, 0)
+	if err != nil || uint64(n) != s.Size {
+		panic("Malformed object file (ReadAt error)")
+	}
+}
+
+func (s *Section) PutUncompressedData(b []byte) {
+	if strings.HasPrefix(s.Name, "__z") {
+		bb := make([]byte, 12)
+		n, err := s.sr.ReadAt(bb, 0)
+		if err != nil {
+			panic("Malformed object file")
+		}
+		if n == len(bb) && string(bb[:4]) == "ZLIB" {
+			size := binary.BigEndian.Uint64(bb[4:12])
+			// Decompress starting at b[12:]
+			r, err := zlib.NewReader(io.NewSectionReader(s, 12, int64(size)-12))
+			if err != nil {
+				panic("Malformed object file (zlib.NewReader error)")
+			}
+			n, err := io.ReadFull(r, b[0:size])
+			if err != nil {
+				panic("Malformed object file (ReadFull error)")
+			}
+			if uint64(n) != size {
+				panic(fmt.Sprintf("PutUncompressedData, expected to read %d bytes, instead read %d", size, n))
+			}
+			if err := r.Close(); err != nil {
+				panic("Malformed object file (Close error)")
+			}
+			return
+		}
+	}
+	// Not compressed
+	s.PutData(b)
+}
+
+func (b LoadBytes) String() string {
+	s := "["
+	for i, a := range b {
+		if i > 0 {
+			s += " "
+			if len(b) > 48 && i >= 16 {
+				s += fmt.Sprintf("... (%d bytes)", len(b))
+				break
+			}
+		}
+		s += fmt.Sprintf("%x", a)
+	}
+	s += "]"
+	return s
+}
+
+func (b LoadBytes) Raw() []byte                { return b }
+func (b LoadBytes) Copy() LoadBytes            { return LoadBytes(append([]byte{}, b...)) }
+func (b LoadBytes) LoadSize(t *FileTOC) uint32 { return uint32(len(b)) }
+
+func (lc LoadCmd) Put(b []byte, o binary.ByteOrder) int {
+	panic(fmt.Sprintf("Put not implemented for %s", lc.String()))
+}
+
+func (s LoadCmdBytes) String() string {
+	return s.LoadCmd.String() + ": " + s.LoadBytes.String()
+}
+func (s LoadCmdBytes) Copy() LoadCmdBytes {
+	return LoadCmdBytes{LoadCmd: s.LoadCmd, LoadBytes: s.LoadBytes.Copy()}
+}
+
+func (s *SegmentHeader) String() string {
+	return fmt.Sprintf(
+		"Seg %s, len=0x%x, addr=0x%x, memsz=0x%x, offset=0x%x, filesz=0x%x, maxprot=0x%x, prot=0x%x, nsect=%d, flag=0x%x, firstsect=%d",
+		s.Name, s.Len, s.Addr, s.Memsz, s.Offset, s.Filesz, s.Maxprot, s.Prot, s.Nsect, s.Flag, s.Firstsect)
+}
+
+func (s *Segment) String() string {
+	return fmt.Sprintf(
+		"Seg %s, len=0x%x, addr=0x%x, memsz=0x%x, offset=0x%x, filesz=0x%x, maxprot=0x%x, prot=0x%x, nsect=%d, flag=0x%x, firstsect=%d",
+		s.Name, s.Len, s.Addr, s.Memsz, s.Offset, s.Filesz, s.Maxprot, s.Prot, s.Nsect, s.Flag, s.Firstsect)
+}
+
+// Data reads and returns the contents of the segment.
+func (s *Segment) Data() ([]byte, error) {
+	dat := make([]byte, s.sr.Size())
+	n, err := s.sr.ReadAt(dat, 0)
+	if n == len(dat) {
+		err = nil
+	}
+	return dat[0:n], err
+}
+
+func (s *Segment) Copy() *Segment {
+	r := &Segment{SegmentHeader: s.SegmentHeader}
+	return r
+}
+func (s *Segment) CopyZeroed() *Segment {
+	r := s.Copy()
+	r.Filesz = 0
+	r.Offset = 0
+	r.Nsect = 0
+	r.Firstsect = 0
+	if s.Command() == LcSegment64 {
+		r.Len = uint32(unsafe.Sizeof(Segment64{}))
+	} else {
+		r.Len = uint32(unsafe.Sizeof(Segment32{}))
+	}
+	return r
+}
+
+func (s *Segment) LoadSize(t *FileTOC) uint32 {
+	if s.Command() == LcSegment64 {
+		return uint32(unsafe.Sizeof(Segment64{})) + uint32(s.Nsect)*uint32(unsafe.Sizeof(Section64{}))
+	}
+	return uint32(unsafe.Sizeof(Segment32{})) + uint32(s.Nsect)*uint32(unsafe.Sizeof(Section32{}))
+}
+
+// Open returns a new ReadSeeker reading the segment.
+func (s *Segment) Open() io.ReadSeeker { return io.NewSectionReader(s.sr, 0, 1<<63-1) }
+
 // Data reads and returns the contents of the Mach-O section.
 func (s *Section) Data() ([]byte, error) {
 	dat := make([]byte, s.sr.Size())
@@ -370,21 +605,21 @@ func (s *Dylib) Copy() *Dylib {
 	r := *s
 	return &r
 }
-func (s *Dylib) LoadSize(t *FileTOC) uint64 {
-	return roundup(uint64(unsafe.Sizeof(DylibCmd{}))+uint64(len(s.Name)), t.LoadAlign())
+func (s *Dylib) LoadSize(t *FileTOC) uint32 {
+	return uint32(RoundUp(uint64(unsafe.Sizeof(DylibCmd{}))+uint64(len(s.Name)), t.LoadAlign()))
 }
 
 type Dylinker struct {
 	DylinkerCmd // shared by 3 commands, need the LoadCmd
-	Name        string
+	Name string
 }
 
 func (s *Dylinker) String() string { return s.DylinkerCmd.LoadCmd.String() + " " + s.Name }
 func (s *Dylinker) Copy() *Dylinker {
 	return &Dylinker{DylinkerCmd: s.DylinkerCmd, Name: s.Name}
 }
-func (s *Dylinker) LoadSize(t *FileTOC) uint64 {
-	return roundup(uint64(unsafe.Sizeof(DylinkerCmd{}))+uint64(len(s.Name)), t.LoadAlign())
+func (s *Dylinker) LoadSize(t *FileTOC) uint32 {
+	return uint32(RoundUp(uint64(unsafe.Sizeof(DylinkerCmd{}))+uint64(len(s.Name)), t.LoadAlign()))
 }
 
 // A Symtab represents a Mach-O symbol table command.
@@ -393,12 +628,22 @@ type Symtab struct {
 	Syms []Symbol
 }
 
+func (s *Symtab) Put(b []byte, o binary.ByteOrder) int {
+	o.PutUint32(b[0*4:], uint32(s.LoadCmd))
+	o.PutUint32(b[1*4:], s.Len)
+	o.PutUint32(b[2*4:], s.Symoff)
+	o.PutUint32(b[3*4:], s.Nsyms)
+	o.PutUint32(b[4*4:], s.Stroff)
+	o.PutUint32(b[5*4:], s.Strsize)
+	return 6 * 4
+}
+
 func (s *Symtab) String() string { return fmt.Sprintf("Symtab %#v", s.SymtabCmd) }
 func (s *Symtab) Copy() *Symtab {
 	return &Symtab{SymtabCmd: s.SymtabCmd, Syms: append([]Symbol{}, s.Syms...)}
 }
-func (s *Symtab) LoadSize(t *FileTOC) uint64 {
-	return uint64(unsafe.Sizeof(SymtabCmd{}))
+func (s *Symtab) LoadSize(t *FileTOC) uint32 {
+	return uint32(unsafe.Sizeof(SymtabCmd{}))
 }
 
 type LinkEditData struct {
@@ -409,8 +654,8 @@ func (s *LinkEditData) String() string { return "LinkEditData " + s.LoadCmd.Stri
 func (s *LinkEditData) Copy() *LinkEditData {
 	return &LinkEditData{LinkEditDataCmd: s.LinkEditDataCmd}
 }
-func (s *LinkEditData) LoadSize(t *FileTOC) uint64 {
-	return uint64(unsafe.Sizeof(LinkEditDataCmd{}))
+func (s *LinkEditData) LoadSize(t *FileTOC) uint32 {
+	return uint32(unsafe.Sizeof(LinkEditDataCmd{}))
 }
 
 type DyldInfo struct {
@@ -421,8 +666,8 @@ func (s *DyldInfo) String() string { return "DyldInfo " + s.LoadCmd.String() }
 func (s *DyldInfo) Copy() *DyldInfo {
 	return &DyldInfo{DyldInfoCmd: s.DyldInfoCmd}
 }
-func (s *DyldInfo) LoadSize(t *FileTOC) uint64 {
-	return uint64(unsafe.Sizeof(DyldInfoCmd{}))
+func (s *DyldInfo) LoadSize(t *FileTOC) uint32 {
+	return uint32(unsafe.Sizeof(DyldInfoCmd{}))
 }
 
 type EncryptionInfo struct {
@@ -433,8 +678,8 @@ func (s *EncryptionInfo) String() string { return "EncryptionInfo " + s.LoadCmd.
 func (s *EncryptionInfo) Copy() *EncryptionInfo {
 	return &EncryptionInfo{EncryptionInfoCmd: s.EncryptionInfoCmd}
 }
-func (s *EncryptionInfo) LoadSize(t *FileTOC) uint64 {
-	return uint64(unsafe.Sizeof(EncryptionInfoCmd{}))
+func (s *EncryptionInfo) LoadSize(t *FileTOC) uint32 {
+	return uint32(unsafe.Sizeof(EncryptionInfoCmd{}))
 }
 
 // A Dysymtab represents a Mach-O dynamic symbol table command.
@@ -447,12 +692,13 @@ func (s *Dysymtab) String() string { return fmt.Sprintf("Dysymtab %#v", s.Dysymt
 func (s *Dysymtab) Copy() *Dysymtab {
 	return &Dysymtab{DysymtabCmd: s.DysymtabCmd, IndirectSyms: append([]uint32{}, s.IndirectSyms...)}
 }
-func (s *Dysymtab) LoadSize(t *FileTOC) uint64 {
-	return uint64(unsafe.Sizeof(DysymtabCmd{}))
+func (s *Dysymtab) LoadSize(t *FileTOC) uint32 {
+	return uint32(unsafe.Sizeof(DysymtabCmd{}))
 }
 
 // A Rpath represents a Mach-O rpath command.
 type Rpath struct {
+	LoadCmd
 	Path string
 }
 
@@ -461,38 +707,8 @@ func (s *Rpath) Command() LoadCmd { return LcRpath }
 func (s *Rpath) Copy() *Rpath {
 	return &Rpath{Path: s.Path}
 }
-func (s *Rpath) LoadSize(t *FileTOC) uint64 {
-	return roundup(uint64(unsafe.Sizeof(RpathCmd{}))+uint64(len(s.Path)), t.LoadAlign())
-}
-
-// A Symbol is a Mach-O 32-bit or 64-bit symbol table entry.
-type Symbol struct {
-	Name  string
-	Type  uint8
-	Sect  uint8
-	Desc  uint16
-	Value uint64
-}
-
-/*
- * Mach-O reader
- */
-
-// FormatError is returned by some operations if the data does
-// not have the correct format for an object file.
-type FormatError struct {
-	off int64
-	msg string
-	val interface{}
-}
-
-func (e *FormatError) Error() string {
-	msg := e.msg
-	if e.val != nil {
-		msg += fmt.Sprintf(" '%v'", e.val)
-	}
-	msg += fmt.Sprintf(" in record at byte %#x", e.off)
-	return msg
+func (s *Rpath) LoadSize(t *FileTOC) uint32 {
+	return uint32(RoundUp(uint64(unsafe.Sizeof(RpathCmd{}))+uint64(len(s.Path)), t.LoadAlign()))
 }
 
 // Open opens the named file using os.Open and prepares it for use as a Mach-O binary.
@@ -522,16 +738,6 @@ func (f *File) Close() error {
 	return err
 }
 
-type fileHeader struct {
-	Magic  uint32
-	Cpu    uint32
-	SubCpu uint32
-	Type   uint32
-	Ncmd   uint32 // number of load commands
-	Cmdsz  uint32 // size of all the load commands
-	Flags  uint32
-}
-
 // NewFile creates a new File for accessing a Mach-O binary in an underlying reader.
 // The Mach-O binary is expected to start at position 0 in the ReaderAt.
 func NewFile(r io.ReaderAt) (*File, error) {
@@ -554,7 +760,7 @@ func NewFile(r io.ReaderAt) (*File, error) {
 		f.ByteOrder = binary.LittleEndian
 		f.Magic = le
 	default:
-		return nil, &FormatError{0, "invalid magic number", nil}
+		return nil, formatError(0, "invalid magic number be=0x%x, le=0x%x", be, le)
 	}
 
 	// Read entire file header.
@@ -576,11 +782,11 @@ func NewFile(r io.ReaderAt) (*File, error) {
 	for i := range f.Loads {
 		// Each load command begins with uint32 command and length.
 		if len(dat) < 8 {
-			return nil, &FormatError{offset, "command block too small", nil}
+			return nil, formatError(offset, "command block too small, len(dat) = %d", len(dat))
 		}
 		cmd, siz := LoadCmd(bo.Uint32(dat[0:4])), bo.Uint32(dat[4:8])
 		if siz < 8 || siz > uint32(len(dat)) {
-			return nil, &FormatError{offset, "invalid command block size", nil}
+			return nil, formatError(offset, "invalid command block size, len(dat)=%d, size=%d", len(dat), siz)
 		}
 		var cmddat []byte
 		cmddat, dat = dat[0:siz], dat[siz:]
@@ -596,9 +802,9 @@ func NewFile(r io.ReaderAt) (*File, error) {
 			if err := binary.Read(b, bo, &hdr); err != nil {
 				return nil, err
 			}
-			l := new(Rpath)
+			l := &Rpath{LoadCmd: hdr.LoadCmd}
 			if hdr.Path >= uint32(len(cmddat)) {
-				return nil, &FormatError{offset, "invalid path in rpath command", hdr.Path}
+				return nil, formatError(offset, "invalid path in rpath command, len(cmddat)=%d", len(cmddat), hdr.Path)
 			}
 			l.Path = cstring(cmddat[hdr.Path:])
 			f.Loads[i] = l
@@ -611,7 +817,7 @@ func NewFile(r io.ReaderAt) (*File, error) {
 			}
 			l := new(Dylinker)
 			if hdr.Name >= uint32(len(cmddat)) {
-				return nil, &FormatError{offset, "invalid name in dynamic linker command", hdr.Name}
+				return nil, formatError(offset, "invalid name in dynamic linker command, hdr.Name=%d, len(cmddat)=%d", hdr.Name, len(cmddat))
 			}
 			l.Name = cstring(cmddat[hdr.Name:])
 			l.DylinkerCmd = hdr
@@ -625,7 +831,7 @@ func NewFile(r io.ReaderAt) (*File, error) {
 			}
 			l := new(Dylib)
 			if hdr.Name >= uint32(len(cmddat)) {
-				return nil, &FormatError{offset, "invalid name in dynamic library command", hdr.Name}
+				return nil, formatError(offset, "invalid name in dynamic library command, hdr.Name=%d, len(cmddat)=%d", hdr.Name, len(cmddat))
 			}
 			l.Name = cstring(cmddat[hdr.Name:])
 			l.Time = hdr.Time
@@ -807,7 +1013,7 @@ func NewFile(r io.ReaderAt) (*File, error) {
 			s.sr = io.NewSectionReader(r, int64(s.Offset), int64(s.Filesz))
 			s.ReaderAt = s.sr
 		}
-		if f.Loads[i].LoadSize(&f.FileTOC) != uint64(siz) {
+		if f.Loads[i].LoadSize(&f.FileTOC) != siz {
 			fmt.Printf("Oops, actual size was %d, calculated was %d, load was %s\n", siz, f.Loads[i].LoadSize(&f.FileTOC), f.Loads[i].String())
 			panic("oops")
 		}
@@ -838,7 +1044,7 @@ func (f *File) parseSymtab(symdat, strtab, cmddat []byte, hdr *SymtabCmd, offset
 		}
 		sym := &symtab[i]
 		if n.Name >= uint32(len(strtab)) {
-			return nil, &FormatError{offset, "invalid name in symbol table", n.Name}
+			return nil, formatError(offset, "invalid name in symbol table, n.Name=%d, len(strtab)=%d", n.Name, len(strtab))
 		}
 		sym.Name = cstring(strtab[n.Name:])
 		sym.Type = n.Type
@@ -1028,7 +1234,7 @@ func (f *File) DWARF() (*dwarf.Data, error) {
 // satisfied by other libraries at dynamic load time.
 func (f *File) ImportedSymbols() ([]string, error) {
 	if f.Dysymtab == nil || f.Symtab == nil {
-		return nil, &FormatError{0, "missing symbol table", nil}
+		return nil, formatError(0, "missing symbol table, f.Dsymtab=%v, f.Symtab=%v", f.Dysymtab, f.Symtab)
 	}
 
 	st := f.Symtab
@@ -1053,6 +1259,6 @@ func (f *File) ImportedLibraries() ([]string, error) {
 	return all, nil
 }
 
-func roundup(x, align uint64) uint64 {
+func RoundUp(x, align uint64) uint64 {
 	return uint64((x + align - 1) & -align)
 }
