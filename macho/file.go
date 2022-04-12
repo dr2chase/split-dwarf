@@ -804,7 +804,7 @@ func NewFile(r io.ReaderAt) (*File, error) {
 			}
 			l := &Rpath{LoadCmd: hdr.LoadCmd}
 			if hdr.Path >= uint32(len(cmddat)) {
-				return nil, formatError(offset, "invalid path in rpath command, len(cmddat)=%d", len(cmddat), hdr.Path)
+				return nil, formatError(offset, "invalid path in rpath command, len(cmddat)=%d, hdr.Path=%d", len(cmddat), hdr.Path)
 			}
 			l.Path = cstring(cmddat[hdr.Path:])
 			f.Loads[i] = l

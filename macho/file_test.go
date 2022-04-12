@@ -7,6 +7,7 @@ package macho
 import (
 	"reflect"
 	"testing"
+	"strings"
 )
 
 type fileTest struct {
@@ -117,7 +118,7 @@ var fileTests = []fileTest{
 			nil, // LC_SOURCE_VERSION
 			nil, // LC_MAIN
 			nil, // LC_LOAD_DYLIB
-			&Rpath{"/my/rpath"},
+			&Rpath{LcRpath, "/my/rpath"},
 			nil, // LC_FUNCTION_STARTS
 			nil, // LC_DATA_IN_CODE
 		},
@@ -141,7 +142,7 @@ var fileTests = []fileTest{
 			nil, // LC_SOURCE_VERSION
 			nil, // LC_MAIN
 			nil, // LC_LOAD_DYLIB
-			&Rpath{"/my/rpath"},
+			&Rpath{ LcRpath,"/my/rpath"},
 			nil, // LC_FUNCTION_STARTS
 			nil, // LC_DATA_IN_CODE
 		},
@@ -352,9 +353,18 @@ func TestOpenFatFailure(t *testing.T) {
 
 	filename = "testdata/gcc-386-darwin-exec" // not a fat Mach-O
 	ff, err := OpenFat(filename)
-	if err != ErrNotFat {
-		t.Errorf("OpenFat %s: got %v, want ErrNotFat", filename, err)
+	if err == nil {
+		t.Errorf("OpenFat %s: expected error, got nil", filename)
 	}
+	if _, ok := err.(*FormatError); !ok {
+		t.Errorf("OpenFat %s: expected FormatError, got %v", filename, err)
+	}
+
+	ferr  := err.(*FormatError)
+	if ! strings.Contains(ferr.String(), "not a fat"){
+		t.Errorf("OpenFat %s: expected error containing 'not a fat', got %s", filename, ferr.String())
+	}
+
 	if ff != nil {
 		t.Errorf("OpenFat %s: got %v, want nil", filename, ff)
 	}

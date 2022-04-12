@@ -5,11 +5,11 @@
 package main
 
 import (
-	"io/ioutil"
-	"strings"
-	"./macho"
 	"fmt"
+	"github.com/dr2chase/split-dwarf/macho"
+	"io/ioutil"
 	"os"
+	"strings"
 	"unsafe"
 )
 
@@ -206,7 +206,7 @@ is used instead.
 	newlinkedit := linkedit.Copy()
 	newlinkedit.Offset = uint64(linkeditsymbase)
 	newlinkedit.Filesz = uint64(linkeditstringcur)
-	newlinkedit.Addr = macho.RoundUp(newdata.Addr + newdata.Memsz, 1<<pageAlign)
+	newlinkedit.Addr = macho.RoundUp(newdata.Addr+newdata.Memsz, 1<<pageAlign)
 	newlinkedit.Memsz = macho.RoundUp(newlinkedit.Filesz, 1<<pageAlign)
 	// The rest should copy over fine.
 	newtoc.AddSegment(newlinkedit)
@@ -259,7 +259,7 @@ is used instead.
 
 	buffer[linkeditstringbase] = ' '
 	buffer[linkeditstringbase+1] = 0
-	offset = linkeditstringbase+2
+	offset = linkeditstringbase + 2
 	for _, str := range linkeditstrings {
 		for i := 0; i < len(str); i++ {
 			buffer[offset] = str[i]
@@ -318,4 +318,3 @@ func describe(exem *macho.FileTOC) {
 	}
 	note("File size is %d", exem.FileSize())
 }
-
